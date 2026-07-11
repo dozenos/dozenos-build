@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 #
 # Copyright (C) 2024-2025 VyOS maintainers and contributors
+# Modifications Copyright DozenOS Contributors. See git history for details.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 or later as

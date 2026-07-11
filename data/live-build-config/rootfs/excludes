@@ -31,6 +31,7 @@ etc/update-motd.d/10-uname
 
 # T4415: We do not need any documentation on the system.
 # Copyright/licenses files are ignored for deletion.
+# Modifications Copyright DozenOS Contributors. See git history for details.
 usr/share/doc/*/!(copyright*|README*)
 usr/share/doc-base
 
