@@ -1,0 +1,308 @@
+# DozenOS INCREMENTAL rebuild-dispatch receiver.
+#
+# Receiving side of the decentralized self-sync fan-out: every dozenos/*
+# mirror's generated sync.yml, after re-syncing itself from upstream, fires
+#   gh api repos/dozenos/dozenos-build/dispatches \
+#     -f event_type="dozenos-package-rebuild" \
+#     -F "client_payload[package]=<that repo's own name>"
+# This workflow rebuilds exactly the changed package plus whatever the
+# dependency graph says must also rebuild -- INCREMENTAL, never the full
+# scripts/package-build/* tree (contrast ../rebuild-packages.yml, which
+# reacts to pushes to dozenos-build's own tree). Full spec and payload
+# contract: ../../../REBUILD-DISPATCH.md; the contract is LOCKED against
+# ../../../sync.yml.template.
+#
+# The resolve job builds by UNIT, not by raw node name: several
+# dep-graph.json nodes are binary .deb names (`python3-vici`, `libtac2`,
+# ...) emitted by a differently-named recipe, or linux-kernel block names
+# (`i40e`, `mlnx`, ...) with no directory of their own, so `cd
+# scripts/package-build/<node>` would fail for them.
+# ../../../dep-graph/nodes-to-build-units.sh computes the transitive
+# closure, maps every node to its buildable unit via dep-graph.json's
+# "build_units.node_to_unit", and dedups. This also normalizes
+# client_payload.package itself for free (the closure always includes the
+# queried package), so a mirror name like `dozenos-vpp-patches` reaches its
+# real build unit (`vpp`) with no separate mapping here. Emitted matrix
+# entries are unit objects:
+#   generic unit: {"recipe": "<scripts/package-build subdir>"}
+#   linux-kernel unit: {"recipe": "linux-kernel", "kernel_blocks": [...]}
+name: DozenOS incremental rebuild (dispatch receiver)
+
+on:
+  repository_dispatch:
+    types: [dozenos-package-rebuild]
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Package name to resolve+rebuild (same value client_payload.package would carry, e.g. vpp, linux-kernel, vyconf) -- for manual testing of the resolver/build path'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dozenos-rebuild-dispatch-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      package: ${{ steps.pkg.outputs.package }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      any: ${{ steps.resolve.outputs.any }}
+    steps:
+      - name: Determine changed package
+        id: pkg
+        env:
+          # Via env, never ${{ }}-interpolated into the script body:
+          # client_payload is sender-controlled data and the dispatch input
+          # is free text -- neither may be able to inject shell here.
+          DISPATCH_PACKAGE: ${{ github.event.client_payload.package }}
+          INPUT_PACKAGE: ${{ inputs.package }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PACKAGE="$INPUT_PACKAGE"
+          else
+            PACKAGE="$DISPATCH_PACKAGE"
+          fi
+          if [ -z "$PACKAGE" ]; then
+            echo "::error::no package name found -- repository_dispatch client_payload.package was empty/missing, or the workflow_dispatch 'package' input was blank. Expected event_type dozenos-package-rebuild with client_payload.package set (see ../../../SYNC.md / ../../../REBUILD-DISPATCH.md)." >&2
+            exit 1
+          fi
+          echo "I: changed package: $PACKAGE"
+          echo "package=$PACKAGE" >> "$GITHUB_OUTPUT"
+
+      # dep-graph/ (graph + resolver + unit mapper) lives in dozenos-rebrand.
+      - name: Mint GitHub App token (dozenos-rebrand checkout)
+        id: app_token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.BUILD_APP_ID }}
+          private-key: ${{ secrets.BUILD_APP_PRIVATE_KEY }}
+          owner: dozenos
+          repositories: dozenos-rebrand
+
+      - name: Checkout dozenos-rebrand
+        uses: actions/checkout@v7
+        with:
+          repository: dozenos/dozenos-rebrand
+          token: ${{ steps.app_token.outputs.token }}
+          path: dozenos-rebrand
+
+      - name: Resolve incremental rebuild set into build units
+        id: resolve
+        env:
+          # Same env-not-interpolation rule as the step above: this output
+          # is derived from the dispatch payload.
+          PACKAGE: ${{ steps.pkg.outputs.package }}
+        run: |
+          set -euo pipefail
+
+          # Any node with no known build unit (e.g. dep-graph.json's
+          # documented build_units.unmappable "squid" case) is dropped with
+          # a warning on stderr, never silently invented.
+          MATRIX=$(dozenos-rebrand/dep-graph/nodes-to-build-units.sh "$PACKAGE" --graph dozenos-rebrand/dep-graph/dep-graph.json --json)
+
+          # shim-signed can never build here: its Build-Depends pins
+          # `shim-unsigned (= <ver>+dozenos1)`, a Secure Boot shim DozenOS
+          # deliberately does not rebuild (the ISO uses Debian's stock
+          # shim-signed -- dozenos-rebrand/SB-SIGNING.md). unionfs-fuse must
+          # never be built either: its 3.6 lacks the /usr/bin/unionfs-fuse
+          # compat name vyatta-cfg execs, and apt would prefer it over
+          # Debian's stock 1.0-1, breaking every config commit in the image
+          # (see ../rebuild-packages.yml's discover comment). Same
+          # exclusions as rebuild-packages.yml and nightly.yml.
+          MATRIX=$(jq -c '[.[] | select(.recipe != "shim-signed" and .recipe != "unionfs-fuse")]' <<<"$MATRIX")
+          echo "I: deduped build-unit matrix for '$PACKAGE': $MATRIX"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+          if [ "$MATRIX" = "[]" ]; then
+            echo "any=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "any=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # build: the matrix is exactly resolve's deduped build-unit set. Same
+  # build shape as ../rebuild-packages.yml (container
+  # ghcr.io/dozenos/dozenos-build:rolling, /dozenos + /dozenos-rebrand
+  # mounts, deb-<unit> artifact upload).
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        unit: ${{ fromJson(needs.resolve.outputs.matrix) }}
+    steps:
+      - name: Checkout dozenos-build
+        uses: actions/checkout@v7
+        with:
+          path: dozenos-build
+
+      # Required for every C2 recipe's `pre_build_hook =
+      # "/dozenos-rebrand/rename-transform.sh ."` (see
+      # ../rebuild-packages.yml's comment).
+      - name: Mint GitHub App token (dozenos-rebrand checkout)
+        id: app_token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.BUILD_APP_ID }}
+          private-key: ${{ secrets.BUILD_APP_PRIVATE_KEY }}
+          owner: dozenos
+          repositories: dozenos-rebrand
+
+      - name: Checkout dozenos-rebrand
+        uses: actions/checkout@v7
+        with:
+          repository: dozenos/dozenos-rebrand
+          token: ${{ steps.app_token.outputs.token }}
+          path: dozenos-rebrand
+
+      # deb-cache (dozenos-rebrand/DEB-CACHE.md): a hit means this unit's
+      # inputs are all unchanged (e.g. an idempotent re-dispatch) and the
+      # stored full .deb set is downloaded instead of rebuilt. Every failure
+      # mode degrades to the normal rebuild, never to a wrong artifact.
+      - name: Compute deb-cache key
+        id: cachekey
+        run: |
+          set -euo pipefail
+          if KEY=$(dozenos-rebrand/release/deb-cache.sh key \
+                --unit "${{ matrix.unit.recipe }}" \
+                --build dozenos-build \
+                --rebrand dozenos-rebrand \
+                --manifest "$RUNNER_TEMP/deb-cache-manifest.json"); then
+            echo "I: deb-cache key for ${{ matrix.unit.recipe }}: $KEY"
+            echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::deb-cache key computation failed for ${{ matrix.unit.recipe }} -- building without cache (fail-safe)"
+            echo "key=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Probe deb cache
+        id: probe
+        if: steps.cachekey.outputs.key != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if dozenos-rebrand/release/deb-cache.sh probe \
+              --unit "${{ matrix.unit.recipe }}" \
+              --key "${{ steps.cachekey.outputs.key }}" \
+              --dest "dozenos-build/scripts/package-build/${{ matrix.unit.recipe }}"; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Neutral /dozenos mount + neutral dozenos_bld build user (see
+      # ../../../MLNX-AND-DWARF.md) applies identically to every matrix
+      # entry here, kernel/OOT included.
+      - name: Build ${{ matrix.unit.recipe }}
+        if: steps.probe.outputs.hit != 'true'
+        run: |
+          set -euo pipefail
+          RECIPE="${{ matrix.unit.recipe }}"
+          if [ "$RECIPE" = "linux-kernel" ]; then
+            # FULL-family build (no --packages narrowing to the resolved
+            # kernel_blocks): a narrowed subset could never be stored in the
+            # deb-cache -- its tag would claim the full unit while holding a
+            # subset, handing the image build an ISO missing NIC-driver debs
+            # -- and the image build rebuilds the full family minutes later
+            # anyway, so narrow-then-full costs strictly more total compute
+            # than full-once-then-cache-hit. kernel_blocks stays useful as
+            # metadata for WHY this unit resolved.
+            echo "I: linux-kernel FULL-family build (resolved trigger blocks: ${{ join(matrix.unit.kernel_blocks, ' ') }})"
+            docker run --rm \
+              -v "${{ github.workspace }}/dozenos-build:/dozenos" \
+              -v "${{ github.workspace }}/dozenos-rebrand:/dozenos-rebrand" \
+              -w /dozenos \
+              ghcr.io/dozenos/dozenos-build:rolling \
+              bash -c "cd scripts/package-build/linux-kernel && python3 build.py"
+          else
+            docker run --rm \
+              -v "${{ github.workspace }}/dozenos-build:/dozenos" \
+              -v "${{ github.workspace }}/dozenos-rebrand:/dozenos-rebrand" \
+              -w /dozenos \
+              ghcr.io/dozenos/dozenos-build:rolling \
+              bash -c "cd scripts/package-build/$RECIPE && python3 ../build.py"
+          fi
+
+      # Store so the image build (same key from the same inputs) hits what
+      # this dispatch just built -- every incremental rebuild pre-warms the
+      # image build's full set. Token minted here, AFTER the (multi-hour,
+      # for kernel) build, so the leg cannot outlive the ~1h token;
+      # continue-on-error because a cache write failure must never fail the
+      # rebuild itself.
+      - name: Mint GitHub App token (deb-cache store)
+        id: cache_token
+        if: steps.cachekey.outputs.key != '' && steps.probe.outputs.hit != 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.BUILD_APP_ID }}
+          private-key: ${{ secrets.BUILD_APP_PRIVATE_KEY }}
+          owner: dozenos
+          repositories: dozenos-deb-cache
+
+      - name: Store built debs into deb cache
+        if: steps.cache_token.outcome == 'success' && steps.cachekey.outputs.key != '' && steps.probe.outputs.hit != 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.cache_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          dozenos-rebrand/release/deb-cache.sh store \
+            --unit "${{ matrix.unit.recipe }}" \
+            --key "${{ steps.cachekey.outputs.key }}" \
+            --debs "dozenos-build/scripts/package-build/${{ matrix.unit.recipe }}" \
+            --manifest "$RUNNER_TEMP/deb-cache-manifest.json"
+
+      - name: Upload built package(s)
+        uses: actions/upload-artifact@v7
+        with:
+          name: deb-${{ matrix.unit.recipe }}
+          path: dozenos-build/scripts/package-build/${{ matrix.unit.recipe }}/*.deb
+          if-no-files-found: warn
+          retention-days: 7
+
+  # notify-nightly: signal dozenos-nightly-build that the mirror set moved.
+  # Image building and the config-load gate both live there (full in-run
+  # rebuild + its own change-gate dedup); this repo builds no ISO of its
+  # own. Cross-repo dispatch needs an App token, not GITHUB_TOKEN.
+  notify-nightly:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Mint GitHub App token (dozenos-nightly-build notify)
+        id: app_token
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.BUILD_APP_ID }}
+          private-key: ${{ secrets.BUILD_APP_PRIVATE_KEY }}
+          owner: dozenos
+          repositories: dozenos-nightly-build
+
+      # Best-effort (continue-on-error): a failed dispatch must never fail
+      # the rebuild that already succeeded.
+      - name: Best-effort notify dozenos-nightly-build
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          # Payload-derived -- env, not interpolation (see resolve job).
+          PACKAGE: ${{ needs.resolve.outputs.package }}
+        run: |
+          set -uo pipefail
+          if gh api repos/dozenos/dozenos-nightly-build/dispatches \
+            -f event_type="dozenos-image-build-requested" \
+            -F "client_payload[package]=$PACKAGE" 2>&1; then
+            echo "I: notified dozenos/dozenos-nightly-build"
+          else
+            echo "I: dozenos/dozenos-nightly-build dispatch failed -- non-fatal (continue-on-error)"
+          fi

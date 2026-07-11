@@ -1,0 +1,19 @@
+# Packages added to images for x86 by default
+packages = [
+  "grub2",
+  "grub-pc",
+  "dozenos-drivers-realtek-r8152",
+  "dozenos-linux-firmware",
+  "dozenos-intel-qat",
+  "dozenos-intel-ixgbe",
+  "dozenos-intel-ixgbevf",
+  "dozenos-intel-i40e",
+  "dozenos-intel-ice",
+  "dozenos-intel-iavf",
+  "dozenos-ipt-netflow",
+  "intel-microcode",
+  "amd64-microcode"
+]
+
+[boot_settings]
+  console_type = "ttyS"

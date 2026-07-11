@@ -1,0 +1,7 @@
+packages = [
+  "gdb",
+  "strace",
+  "apt-rdepends",
+  "vim",
+  "dozenos-1x-smoketest"
+]

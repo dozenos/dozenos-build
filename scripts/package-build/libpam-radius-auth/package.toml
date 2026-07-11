@@ -1,0 +1,11 @@
+[[packages]]
+name = "libpam-radius-auth"
+commit_id = "rolling"
+scm_url = "https://github.com/dozenos/libpam-radius-auth.git"
+pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
+
+[dependencies]
+packages = [
+    "libpam-dev",
+    "libaudit-dev"
+]

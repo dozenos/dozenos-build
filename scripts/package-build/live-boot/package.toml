@@ -1,0 +1,23 @@
+# DozenOS-added package-build recipe for `live-boot` (added 2026-07-08).
+#
+# The generic ISO needs a forked `live-boot` (Debian's stock live-boot lacks
+# the patches the router image relies on). Upstream builds it in a standalone
+# source repo and publishes the prebuilt .deb to an external apt repo; DozenOS
+# instead builds it IN-TREE from the `dozenos/live-boot` mirror -- a
+# rename-transform snapshot of that upstream source -- exactly like every other
+# standalone package mirror (hvinfo, ipaddrcheck, vyatta-*, ...), so the ISO's
+# ephemeral apt repo carries a DozenOS-built `live-boot` / `live-boot-doc` /
+# `live-boot-initramfs-tools` instead of pulling a prebuilt one from an external
+# host. live-boot-initramfs-tools is the binary the generic ISO actually pulls
+# in (as a live-config dependency).
+#
+# Shipped as an overlay new-file (overlay/new-files/scripts/package-build/
+# live-boot/) so mirror-push.sh re-applies it on every dozenos-build sync --
+# it is NOT part of the mirrored upstream build tree. See dozenos-rebrand's
+# commit history / CI notes for the exact upstream provenance.
+[[packages]]
+name = "live-boot"
+commit_id = "rolling"
+scm_url = "https://github.com/dozenos/live-boot.git"
+pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
+build_cmd = "dpkg-buildpackage -us -uc -tc -b"

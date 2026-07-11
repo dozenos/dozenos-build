@@ -1,0 +1,10 @@
+[[packages]]
+name = "libnss-mapuser"
+commit_id = "rolling"
+scm_url = "https://github.com/dozenos/libnss-mapuser.git"
+pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
+
+[dependencies]
+packages = [
+    "libaudit-dev"
+]

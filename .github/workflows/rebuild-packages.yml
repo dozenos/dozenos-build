@@ -1,0 +1,235 @@
+# DozenOS per-package (C2) rebuild workflow.
+#
+# Replaces the upstream "trigger rebuild packages" workflow, which only
+# curl-dispatched builds into a private org-scoped "reuse" repo DozenOS does
+# not have: a discover job computes a dynamic matrix (no hand-maintained
+# per-package filter/if list) and a build job runs each package build
+# inline, in-repo. Same intent and same push-to-`rolling` trigger as
+# upstream.
+#
+# Builds only -- no publishing (no apt/R2 hosting secrets exist, see
+# dozenos-rebrand/CI-SECRETS.md) and no GPG signing (the C2 build_cmd uses
+# `dpkg-buildpackage -us -uc`, matching upstream). Output .debs are uploaded
+# as workflow artifacts.
+name: Rebuild DozenOS packages
+
+on:
+  push:
+    branches:
+      - rolling
+    paths:
+      - 'scripts/package-build/**'
+      - '!scripts/package-build/linux-kernel/**'
+      # shim-signed/unionfs-fuse are never auto-built -- see the discover
+      # step's comment.
+      - '!scripts/package-build/shim-signed/**'
+      - '!scripts/package-build/unionfs-fuse/**'
+  workflow_dispatch:
+    inputs:
+      package_name:
+        description: 'Single package dir under scripts/package-build/ to rebuild (blank = discover all non-excluded packages)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.set.outputs.packages }}
+      any: ${{ steps.set.outputs.any }}
+    steps:
+      - name: Checkout dozenos-build
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - name: Discover changed/requested packages
+        id: set
+        shell: bash
+        env:
+          # Via env, never ${{ }}-interpolated into the script body: the
+          # dispatch input is free text and must not be able to inject shell
+          # here. BEFORE/AFTER are GitHub-validated SHAs but ride along for
+          # uniformity.
+          INPUT_PACKAGE_NAME: ${{ inputs.package_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          # linux-kernel is excluded: its bespoke multi-package build.py is
+          # not a generic C2 recipe and never reads pre_build_hook (see
+          # wire-prebuild-hooks.sh's EXCLUDE_RECIPES). shim-signed is
+          # excluded: its Build-Depends pins `shim-unsigned (= <ver>+dozenos1)`,
+          # a Secure Boot shim DozenOS deliberately does not rebuild (the
+          # ISO uses Debian's stock shim-signed -- see
+          # dozenos-rebrand/SB-SIGNING.md); the recipe dir stays in-tree
+          # only for 1:1 upstream mirror parity. unionfs-fuse is excluded:
+          # the recipe's 3.6 ships only /usr/bin/unionfs, apt prefers it
+          # (3.6 > 1.0-1) over Debian bookworm's stock package, and losing
+          # Debian's /usr/bin/unionfs-fuse compat name breaks EVERY config
+          # commit (vyatta-cfg execs that exact path; the session unionfs
+          # mount ENOENTs and the committed active config degrades to the
+          # diff only). The ISO must install Debian's stock unionfs-fuse.
+          discover_all() {
+            find scripts/package-build -mindepth 1 -maxdepth 1 -type d \
+              ! -name linux-kernel ! -name shim-signed ! -name unionfs-fuse \
+              -printf '%f\n' \
+              | sort | jq -R . | jq -sc .
+          }
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "$INPUT_PACKAGE_NAME" ]; then
+            packages=$(jq -cn --arg p "$INPUT_PACKAGE_NAME" '[$p]')
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            packages=$(discover_all)
+          else
+            # Diff-based discovery, with a FULL-SET fallback whenever the
+            # diff cannot be computed (all-zeros BEFORE on branch creation,
+            # BEFORE outside fetch-depth on a multi-commit push -- the
+            # targeted `git fetch <sha>` recovers that one -- or an
+            # unreachable BEFORE after a force-push). Unknown scope must
+            # mean "rebuild everything", never an empty matrix; the
+            # deb-cache keeps the full set cheap (unchanged units probe-hit
+            # and skip their build).
+            diff_ok=1
+            if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              diff_ok=0
+            else
+              git cat-file -e "${BEFORE}^{commit}" 2>/dev/null \
+                || git fetch --quiet --depth=1 origin "$BEFORE" 2>/dev/null || true
+              changed_files=$(git diff --name-only "$BEFORE" "$AFTER" -- scripts/package-build/ 2>/dev/null) \
+                || diff_ok=0
+            fi
+            if [ "$diff_ok" = 1 ]; then
+              changed=$(printf '%s\n' "$changed_files" \
+                | awk -F/ '{print $3}' | sort -u | grep -vxE 'linux-kernel|shim-signed|unionfs-fuse' || true)
+              packages=$(printf '%s\n' "$changed" | jq -R . | jq -sc 'map(select(length > 0))')
+            else
+              echo "::warning::cannot diff $BEFORE..$AFTER (branch creation or force-push) -- falling back to the FULL package set (deb-cache keeps unchanged units cheap)"
+              packages=$(discover_all)
+            fi
+          fi
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
+          if [ "$packages" = "[]" ]; then
+            echo "any=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "any=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "I: packages to build: $packages"
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: ${{ fromJson(needs.discover.outputs.packages) }}
+    steps:
+      - name: Checkout dozenos-build
+        uses: actions/checkout@v7
+        with:
+          path: dozenos-build
+
+      # /dozenos-rebrand must exist at that exact absolute path inside the
+      # build container: every C2 recipe's package.toml carries
+      # `pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."`, which
+      # build.py shells out to.
+      - name: Mint GitHub App token (dozenos-rebrand checkout)
+        id: app_token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.BUILD_APP_ID }}
+          private-key: ${{ secrets.BUILD_APP_PRIVATE_KEY }}
+          owner: dozenos
+          repositories: dozenos-rebrand
+
+      - name: Checkout dozenos-rebrand
+        uses: actions/checkout@v7
+        with:
+          repository: dozenos/dozenos-rebrand
+          token: ${{ steps.app_token.outputs.token }}
+          path: dozenos-rebrand
+
+      # deb-cache (dozenos-rebrand/DEB-CACHE.md): a push that changed this
+      # recipe misses (the recipe tree hash is key material) and the store
+      # pre-warms the nightly; a push that did not change this recipe's
+      # inputs hits and skips the rebuild. Every failure mode degrades to
+      # the normal rebuild.
+      - name: Compute deb-cache key
+        id: cachekey
+        run: |
+          set -euo pipefail
+          if KEY=$(dozenos-rebrand/release/deb-cache.sh key \
+                --unit "${{ matrix.pkg }}" \
+                --build dozenos-build \
+                --rebrand dozenos-rebrand \
+                --manifest "$RUNNER_TEMP/deb-cache-manifest.json"); then
+            echo "I: deb-cache key for ${{ matrix.pkg }}: $KEY"
+            echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::deb-cache key computation failed for ${{ matrix.pkg }} -- building without cache (fail-safe)"
+            echo "key=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Probe deb cache
+        id: probe
+        if: steps.cachekey.outputs.key != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if dozenos-rebrand/release/deb-cache.sh probe \
+              --unit "${{ matrix.pkg }}" \
+              --key "${{ steps.cachekey.outputs.key }}" \
+              --dest "dozenos-build/scripts/package-build/${{ matrix.pkg }}"; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build ${{ matrix.pkg }}
+        if: steps.probe.outputs.hit != 'true'
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/dozenos-build:/dozenos" \
+            -v "${{ github.workspace }}/dozenos-rebrand:/dozenos-rebrand" \
+            -w /dozenos \
+            ghcr.io/dozenos/dozenos-build:rolling \
+            bash -c "cd scripts/package-build/${{ matrix.pkg }} && python3 ../build.py"
+
+      # Token minted AFTER the build (App tokens live ~1h; a slow leg would
+      # outlive a pre-build mint); continue-on-error because a cache write
+      # failure must never fail the rebuild itself.
+      - name: Mint GitHub App token (deb-cache store)
+        id: cache_token
+        if: steps.cachekey.outputs.key != '' && steps.probe.outputs.hit != 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.BUILD_APP_ID }}
+          private-key: ${{ secrets.BUILD_APP_PRIVATE_KEY }}
+          owner: dozenos
+          repositories: dozenos-deb-cache
+
+      - name: Store built debs into deb cache
+        if: steps.cache_token.outcome == 'success' && steps.cachekey.outputs.key != '' && steps.probe.outputs.hit != 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.cache_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          dozenos-rebrand/release/deb-cache.sh store \
+            --unit "${{ matrix.pkg }}" \
+            --key "${{ steps.cachekey.outputs.key }}" \
+            --debs "dozenos-build/scripts/package-build/${{ matrix.pkg }}" \
+            --manifest "$RUNNER_TEMP/deb-cache-manifest.json"
+
+      - name: Upload built package(s)
+        uses: actions/upload-artifact@v7
+        with:
+          name: deb-${{ matrix.pkg }}
+          path: dozenos-build/scripts/package-build/${{ matrix.pkg }}/*.deb
+          if-no-files-found: warn
+          retention-days: 7

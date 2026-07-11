@@ -1,0 +1,12 @@
+[[packages]]
+name = "shim-signed"
+commit_id = "rolling"
+scm_url = "https://github.com/dozenos/shim-signed.git"
+pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
+
+[dependencies]
+packages = [
+    "shim-helpers-amd64-signed",
+    "shim-helpers-amd64-signed-template",
+    "shim-unsigned"
+]

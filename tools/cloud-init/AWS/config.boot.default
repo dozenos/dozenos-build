@@ -1,0 +1,43 @@
+system {
+    host-name dozenos
+    login {
+        user dozenos {
+            authentication {
+                encrypted-password "*"
+                plaintext-password ""
+            }
+            level admin
+        }
+    }
+    option {
+        reboot-on-upgrade-failure 5
+    }
+    syslog {
+        local {
+            facility all {
+                level info
+            }
+            facility protocols {
+                level debug
+            }
+        }
+    }
+    ntp {
+        server "time1.dozenos.net"
+        server "time2.dozenos.net"
+        server "time3.dozenos.net"
+    }
+    console {
+        device ttyS0 {
+            speed 115200
+        }
+    }
+    config-management {
+        commit-revisions 100
+    }
+}
+
+interfaces {
+    loopback lo {
+    }
+}

@@ -1,0 +1,5 @@
+[[packages]]
+name = "dozenos-1x"
+commit_id = "rolling"
+scm_url = "https://github.com/dozenos/dozenos-1x.git"
+pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."

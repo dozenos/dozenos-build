@@ -1,0 +1,28 @@
+packages = [
+  "gdb",
+  "strace",
+  "apt-rdepends",
+  "vim",
+  "dozenos-1x-smoketest"
+]
+
+[[includes_chroot]]
+  path = 'usr/share/dozenos/EULA'
+  data = '''
+DozenOS END USER NOTICE
+
+DozenOS is a community-built network operating system assembled from
+free and open source software. Each component is governed by its own
+license (the GNU GPL, the GNU LGPL, and other OSI-approved licenses).
+The corresponding source code is available from the public repositories
+at https://github.com/dozenos.
+
+DozenOS is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE, to the extent permitted by applicable
+law.
+
+DozenOS is an independent community project. It is not affiliated with,
+endorsed by, or supported by any commercial vendor, and no commercial
+entity stands behind it.
+'''

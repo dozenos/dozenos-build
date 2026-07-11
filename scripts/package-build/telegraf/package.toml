@@ -1,0 +1,6 @@
+[[packages]]
+name = "telegraf"
+commit_id = "v1.28.3"
+scm_url = "https://github.com/influxdata/telegraf.git"
+pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
+build_cmd = "cd ..; ./build.sh; cp telegraf/build/dist/*.deb ."

@@ -1,0 +1,27 @@
+build_type = "development"
+
+architecture = "amd64"
+
+debian_distribution = "bookworm"
+
+debian_mirror = "http://deb.debian.org/debian"
+debian_security_mirror = "http://deb.debian.org/debian-security"
+
+debian_archive_areas = "main contrib non-free non-free-firmware"
+
+dozenos_mirror = "https://packages.dozenos.net/repositories/rolling"
+
+dozenos_branch = "rolling"
+release_train = "rolling"
+
+kernel_version = "6.18.38"
+kernel_flavor = "dozenos"
+bootloaders = "syslinux,grub-efi"
+
+squashfs_compression_type = "xz -Xbcj x86 -b 256k -always-use-fragments -no-recovery"
+
+website_url = "https://dozenos.github.io/dozenos-nightly-build"
+support_url = "https://github.com/dozenos/dozenos-nightly-build/issues"
+bugtracker_url = "https://github.com/dozenos/dozenos-nightly-build/issues"
+documentation_url = "https://github.com/dozenos"
+project_news_url = "https://dozenos.github.io/dozenos-nightly-build"
