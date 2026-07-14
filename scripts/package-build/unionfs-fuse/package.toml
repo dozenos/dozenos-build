@@ -2,7 +2,6 @@
 name = "unionfs-fuse"
 commit_id = "v3.6"
 scm_url = "https://github.com/rpodgorny/unionfs-fuse"
-pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
 
 build_cmd = """
 mkdir build

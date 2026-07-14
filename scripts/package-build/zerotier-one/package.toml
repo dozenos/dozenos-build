@@ -2,7 +2,6 @@
 name = "zerotier-one"
 commit_id = "1.16.0"
 scm_url = "https://github.com/zerotier/ZeroTierOne.git"
-pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
 
 build_cmd = """
 make -j"$(nproc)" ZT_SSO_SUPPORTED=0

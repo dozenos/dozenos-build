@@ -2,7 +2,6 @@
 name = "podman"
 commit_id = "v5.8.4"
 scm_url = "https://github.com/containers/podman"
-pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
 
 #build_cmd = "cd ..; ./build.sh"
 build_cmd = """

@@ -2,5 +2,4 @@
 name = "net-snmp"
 commit_id = "debian/5.9.4+dfsg-1"
 scm_url = "https://salsa.debian.org/debian/net-snmp"
-pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
 build_cmd = "dpkg-buildpackage -us -uc -tc -b || true"

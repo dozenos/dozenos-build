@@ -2,4 +2,3 @@
 name = "keepalived"
 commit_id = "debian/1%2.3.3-1"
 scm_url = "https://salsa.debian.org/debian/pkg-keepalived.git"
-pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."

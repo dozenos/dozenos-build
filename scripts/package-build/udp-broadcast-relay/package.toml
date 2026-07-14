@@ -2,7 +2,6 @@
 name = "udp-broadcast-relay"
 commit_id = "9a0f13b4b5938bfe0af0d0d4e99dfc127c068e28"
 scm_url = "https://github.com/nomeata/udp-broadcast-relay"
-pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
 
 apply_patches = false
 

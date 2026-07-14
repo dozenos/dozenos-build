@@ -2,7 +2,6 @@
 name = "aws-gwlbtun"
 commit_id = "c1fd48b"
 scm_url = "https://github.com/aws-samples/aws-gateway-load-balancer-tunnel-handler"
-pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
 
 
 ## Build cmd start

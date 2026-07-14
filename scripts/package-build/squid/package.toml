@@ -2,7 +2,6 @@
 name = "squid"
 commit_id = "debian/7.6-2"
 scm_url = "https://salsa.debian.org/squid-team/squid"
-pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
 
 [dependencies]
   packages = [

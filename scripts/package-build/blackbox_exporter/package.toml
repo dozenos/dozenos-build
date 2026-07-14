@@ -2,5 +2,4 @@
 name = "blackbox_exporter"
 commit_id = "v0.26.0"
 scm_url = "https://github.com/prometheus/blackbox_exporter"
-pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
 build_cmd = "cd ..; y | ./build.sh"

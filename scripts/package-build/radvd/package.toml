@@ -2,7 +2,6 @@
 name = "radvd"
 commit_id = "v2.20"
 scm_url = "https://github.com/radvd-project/radvd"
-pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
 
 #build_cmd = "cd ..; ./build.sh"
 build_cmd = """

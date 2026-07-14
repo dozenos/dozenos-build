@@ -4,7 +4,6 @@
 name = "bash-completion"
 commit_id = "debian/2.8-6"
 scm_url = "https://salsa.debian.org/debian/bash-completion"
-pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
 
 build_cmd = """
 

@@ -2,4 +2,3 @@
 name = "ethtool"
 commit_id = "debian/1%6.10-1"
 scm_url = "https://salsa.debian.org/kernel-team/ethtool"
-pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."

@@ -2,7 +2,6 @@
 name = "dozenos-vpp-patches"
 commit_id = "rolling"
 scm_url = "https://github.com/dozenos/dozenos-vpp-patches"
-pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
 build_cmd = "/bin/true"
 apply_patches = false
 

@@ -2,7 +2,6 @@
 name = "isc-dhcp"
 commit_id = "debian/4.4.3-P1-4"
 scm_url = "https://salsa.debian.org/debian/isc-dhcp"
-pre_build_hook = "/dozenos-rebrand/rename-transform.sh ."
 
 [dependencies]
 packages = ["libpam0g-dev"]
