@@ -1025,7 +1025,6 @@ try:
     # Booting installed system
     #################################################
     log.info('Booting installed system')
-    BOOTLOADERchooseSerialConsole(c, live=False)
 
     #################################################
     # Logging into DozenOS system
