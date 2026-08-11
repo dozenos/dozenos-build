@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 # All selected drivers are then precomfiled "make drivers/foo/bar.i" and we grep for
 # the magic word "UNIQUE_ID_firmware" which identifies firmware files.
@@ -6,6 +7,7 @@
 CWD=$(pwd)
 LINUX_FIRMWARE="linux-firmware"
 KERNEL_VAR_FILE=${CWD}/kernel-vars
+. ${CWD}/common.sh
 
 . ${KERNEL_VAR_FILE}
 
@@ -87,10 +89,49 @@ done
 
 echo "I: Create linux-firmware package"
 rm -f ${DOZENOS_FIRMWARE_NAME}_*.deb
-fpm --input-type dir --output-type deb --name ${DOZENOS_FIRMWARE_NAME} \
-    --maintainer "DozenOS Package Maintainers <maintainers@dozenos.local>" \
-    --description "Binary firmware for various drivers in the Linux kernel" \
-    --architecture all --version ${GIT_COMMIT} --deb-compression gz -C ${DOZENOS_FIRMWARE_DIR}
+
+PACKAGE_VERSION=$(debian_version "${GIT_COMMIT}")
+
+cd ${DOZENOS_FIRMWARE_DIR}
+
+debmake -n -y -p ${DOZENOS_FIRMWARE_NAME} -u ${PACKAGE_VERSION} \
+    -e maintainers@dozenos.local -f "DozenOS Package Maintainers"
+
+cat << EOF > debian/control
+Source: ${DOZENOS_FIRMWARE_NAME}
+Section: kernel
+Priority: optional
+Maintainer: DozenOS Package Maintainers <maintainers@dozenos.local>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.5.1
+Rules-Requires-Root: no
+
+Package: ${DOZENOS_FIRMWARE_NAME}
+Architecture: all
+Depends: \${misc:Depends}
+Description: Binary firmware for various drivers in the Linux kernel
+ Firmware blobs assembled from linux-firmware.git for the drivers built
+ into the DozenOS kernel.
+EOF
+
+cat << EOF > debian/rules
+#!/usr/bin/make -f
+PACKAGE_BUILD_DIR := debian/${DOZENOS_FIRMWARE_NAME}
+
+%:
+	dh \$@
+
+override_dh_auto_build:
+	@true
+
+override_dh_auto_install:
+	mkdir -p \${PACKAGE_BUILD_DIR}
+	cp -a lib \${PACKAGE_BUILD_DIR}/
+EOF
+
+debuild
+
+cd ${CWD}
 
 rm -rf "${LINUX_FIRMWARE_BUILD_DIR}"
 rm -rf ${DOZENOS_FIRMWARE_DIR}
