@@ -167,6 +167,13 @@ args = parser.parse_args()
 if os.geteuid() != 0:
     exit('You need to have root privileges to run this script.')
 
+if platform.machine() not in ['amd64', 'x86_64', 'arm64', 'aarch64']:
+    exit(f'Unsupported host architecture "{platform.machine()}" - this script '
+         'only runs on amd64 or arm64 hosts.')
+
+if platform.machine() in ['arm64', 'aarch64'] and not args.uefi:
+    exit('--uefi is mandatory when running on arm64 hosts.')
+
 if args.cloud_init:
     hostname = CI_CONFIG_ARGS['hostname']
     op_mode_prompt = rf'dozenos@{hostname}:~\$'
@@ -303,8 +310,14 @@ def get_qemu_cmd(name, enable_uefi, disk_img, raid=None, iso_img=None, tpm=False
         -device scsi-hd,bus=scsi0.0,drive=drive-hd1,id=hd1,bootindex=1'
 
     if raid:
-        cmd += f' -drive format={disk_format},file={raid},if=none,media=disk,id=drive-hd2,readonly=off' \
-               f' -device scsi-hd,bus=scsi0.0,drive=drive-hd2,id=hd2,bootindex=2'
+        # RAID member disks each get their own virtio-scsi-pci controller.
+        # OVMF only appears to honor QEMU's per-device "bootindex" when disks
+        # sit behind separate PCI controllers - sharing one controller via
+        # SCSI LUN makes it always boot LUN 0 regardless of bootindex, which
+        # breaks the RAID-failure simulation's boot-priority swap under UEFI.
+        cmd += f' -device virtio-scsi-pci,id=scsi1' \
+               f' -drive format={disk_format},file={raid},if=none,media=disk,id=drive-hd2,readonly=off' \
+               f' -device scsi-hd,bus=scsi1.0,drive=drive-hd2,id=hd2,bootindex=2'
 
     if tpm:
         cmd += f' -chardev socket,id=chrtpm,path={tpm_sock}' \
@@ -548,7 +561,7 @@ def toggleUEFISecureBoot(c):
     UEFIKeyPress(c, KEY_DOWN)
     UEFIKeyPress(c, KEY_RETURN)
 
-def BOOTLOADERchooseSerialConsole(child, live: bool) -> None:
+def BOOTLOADERchooseSerialConsole(child, live: bool, log=None) -> None:
     """ Select GRUB boot entry that uses the serial console. This differs
         between a LIVE ISO image and an already installed system. """
     BOOTLOADER_TMO = 40
@@ -597,39 +610,58 @@ def BOOTLOADERchooseSerialConsole(child, live: bool) -> None:
         # Wait for GRUB
         child.expect(GRUB_STRING, timeout=BOOTLOADER_TMO)
 
-        # Unlike the live ISO menus (10s timeout), the installed system's
-        # top-level menu auto-boots its default entry after ~BOOTLOADER_LOAD_TMO
-        # seconds - the same delay this script would otherwise sleep before
-        # sending any key. Under host load that leaves no margin: GRUB can
-        # auto-boot before "Boot options" is ever selected. Send the first
-        # navigation key immediately to cancel the countdown, then give the
-        # screen time to settle.
-        # Select GRUB serial console
-        # Boot options
-        child.send(KEY_DOWN)
-        time.sleep(BOOTLOADER_LOAD_TMO)
-        child.send(KEY_RETURN)
-        time.sleep(BOOTLOADER_SLEEP)
-        # GRUB submenus never time out on their own, so confirm we actually
-        # landed on this submenu before navigating further - otherwise a
-        # dropped keypress leaves the VM stuck here until the login wait
-        # elsewhere expires
-        child.expect('Select console type', timeout=BOOTLOADER_TMO)
+        # The installed system's top-level menu auto-boots its default
+        # entry after ~BOOTLOADER_LOAD_TMO seconds, timed from when GRUB
+        # itself draws the menu - not from when this script's regex match
+        # on GRUB_STRING returns. Under host load the menu text can reach
+        # us well after that internal countdown already started, so there
+        # is no reliable amount of "send a key fast enough" that wins this
+        # race every time.
+        #
+        # That's fine to lose: the installer always answers 'S' (serial)
+        # to "What console should be used by default?", so the default
+        # entry GRUB auto-boots already targets the right console.
+        # waitForLogin()/loginVM(), called after this function returns,
+        # already tolerate landing straight on the GRUB countdown or the
+        # login prompt. So treat this submenu navigation as best-effort:
+        # if we don't land in "Boot options" in time, stop navigating and
+        # let the default entry (which is already auto-booting) carry on,
+        # instead of raising and aborting the whole test.
+        try:
+            # Select GRUB serial console
+            # Boot options
+            child.send(KEY_DOWN)
+            time.sleep(BOOTLOADER_LOAD_TMO)
+            child.send(KEY_RETURN)
+            time.sleep(BOOTLOADER_SLEEP)
+            # GRUB submenus never time out on their own, so confirm we actually
+            # landed on this submenu before navigating further - otherwise a
+            # dropped keypress leaves the VM stuck here until the login wait
+            # elsewhere expires
+            child.expect('Select console type', timeout=BOOTLOADER_TMO)
+        except pexpect.TIMEOUT:
+            if log is not None:
+                log.warning('GRUB auto-booted the default entry before "Boot '
+                            'options" navigation completed; continuing since '
+                            'the default entry already boots the serial '
+                            'console selected during install')
+        else:
+            # We're inside the submenu, so a timeout past this point is a
+            # real navigation bug, not the auto-boot race - let it propagate.
+            # Select console type
+            child.send(KEY_DOWN)
+            time.sleep(BOOTLOADER_SLEEP)
+            child.send(KEY_RETURN)
+            time.sleep(BOOTLOADER_SLEEP)
+            child.expect(r'ttyS \(serial\)', timeout=BOOTLOADER_TMO)
 
-        # Select console type
-        child.send(KEY_DOWN)
-        time.sleep(BOOTLOADER_SLEEP)
-        child.send(KEY_RETURN)
-        time.sleep(BOOTLOADER_SLEEP)
-        child.expect(r'ttyS \(serial\)', timeout=BOOTLOADER_TMO)
-
-        # *ttyS (serial)
-        child.send(KEY_DOWN)
-        time.sleep(BOOTLOADER_SLEEP)
-        child.send(KEY_RETURN)
-        time.sleep(BOOTLOADER_SLEEP)
-        # Boot
-        child.send(KEY_RETURN)
+            # *ttyS (serial)
+            child.send(KEY_DOWN)
+            time.sleep(BOOTLOADER_SLEEP)
+            child.send(KEY_RETURN)
+            time.sleep(BOOTLOADER_SLEEP)
+            # Boot
+            child.send(KEY_RETURN)
 
     return None
 
@@ -722,6 +754,64 @@ def verify_eth_mac_mapping(c, log):
         if macs[ifname] != expected_mac:
             raise Exception(f'Interface {ifname} has MAC {macs[ifname]}, expected {expected_mac} - naming race?')
     log.info('eth0..eth7 MAC mapping verified')
+
+def verify_swapped_hwid_assignment(c, log, mac1, mac2):
+    """ eth1/eth2 were just explicitly reassigned to the opposite of their
+        default MAC order (eth1 -> the numerically higher MAC, eth2 -> the
+        lower one) - an ordinary, unambiguous rightful-owner rename that
+        must take effect cleanly. This is the precondition for the next
+        check: an existing box whose interface names do not follow
+        ascending PCIe/MAC order, exactly like a real, already-provisioned
+        system (its hw-id came from historical probe-order rescan, not
+        from this sort). """
+    log.info('Verify the swapped eth1/eth2 hw-id assignment took effect')
+    c.sendline('ip -json link show | jq -r \'.[] | select(.ifname|test("^eth[0-9]+$")) | "\(.ifname) \(.address)"\'')
+    c.expect(op_mode_prompt)
+    lines = [l.strip() for l in c.before.decode(errors='replace').splitlines() if l.strip()]
+
+    macs = {}
+    for line in lines:
+        parts = line.split()
+        if len(parts) == 2 and re.fullmatch(r'eth\d+', parts[0]):
+            macs[parts[0]] = parts[1].lower()
+
+    if macs.get('eth1') != mac2:
+        raise Exception(f'Interface eth1 has MAC {macs.get("eth1")}, expected {mac2} '
+                         '- swapped hw-id assignment did not take effect')
+    if macs.get('eth2') != mac1:
+        raise Exception(f'Interface eth2 has MAC {macs.get("eth2")}, expected {mac1} '
+                         '- swapped hw-id assignment did not take effect')
+    log.info('Swapped hw-id assignment confirmed - eth1/eth2 no longer follow ascending MAC order')
+
+def verify_pending_node_never_gets_wrong_hardware(c, log, ifname, wrong_mac):
+    """ Regression reported against an earlier PCIe/MAC-sorted replacement
+        fill: with an unrelated interface fully removed in the same boot
+        that `ifname`'s hw-id alone was cleared, there is no way to tell
+        which of the freed candidates is genuinely `ifname`'s own
+        hardware once its hw-id is gone - so the fix leaves `ifname`
+        pending (safely unresolved) rather than guessing. `ifname` must
+        never end up bound to `wrong_mac` - the OTHER freed interface's
+        hardware - which would silently apply a setting configured on
+        `ifname` (e.g. address) to a different physical NIC. `ifname`
+        simply not existing (still pending) is the expected, safe
+        outcome here, not a failure. """
+    log.info(f'Verify {ifname} was never bound to the wrong physical NIC')
+    c.sendline('ip -json link show | jq -r \'.[] | select(.ifname|test("^eth[0-9]+$")) | "\(.ifname) \(.address)"\'')
+    c.expect(op_mode_prompt)
+    lines = [l.strip() for l in c.before.decode(errors='replace').splitlines() if l.strip()]
+
+    macs = {}
+    for line in lines:
+        parts = line.split()
+        if len(parts) == 2 and re.fullmatch(r'eth\d+', parts[0]):
+            macs[parts[0]] = parts[1].lower()
+
+    if macs.get(ifname) == wrong_mac:
+        raise Exception(f'Interface {ifname} has MAC {wrong_mac} - bound to the '
+                         "OTHER freed interface's hardware instead of its own "
+                         f'(a setting configured on {ifname} is now applied to '
+                         'the wrong wire)')
+    log.info(f'{ifname} was not bound to the wrong physical NIC')
 
 def _image_update_cli_sequence(c, log, new_image_name, server_bind_host='127.0.0.1', use_vrf=False):
     """One add-system-image/delete cycle for nested ISO over HTTP (optional Linux VRF + DozenOS vrf arg)."""
@@ -905,7 +995,7 @@ try:
         log.info('Disable UEFI Secure Boot for initial installation')
         toggleUEFISecureBoot(c)
 
-    BOOTLOADERchooseSerialConsole(c, live=(not args.cloud_init))
+    BOOTLOADERchooseSerialConsole(c, live=(not args.cloud_init), log=log)
     loginVM(c, log)
 
     #################################################
@@ -1071,6 +1161,7 @@ try:
     # Booting installed system
     #################################################
     log.info('Booting installed system')
+    BOOTLOADERchooseSerialConsole(c, live=False, log=log)
 
     #################################################
     # Logging into DozenOS system
@@ -1317,16 +1408,24 @@ try:
     elif args.ifnametest:
         # A missing/deleted hw-id binding, or a fully deleted interface
         # config, must not change the eth0..eth7 <-> MAC mapping after
-        # the next reboot (regression check for the boot-time naming race).
+        # the next reboot (regression check for the boot-time naming
+        # race). Deliberately run as two INDEPENDENT reboots rather than
+        # one combined one: a pending node (hw-id cleared, node kept)
+        # only ever recovers its own hardware automatically when it's
+        # the sole candidate of its type this boot - if a different,
+        # unrelated interface's config were ALSO fully removed in the
+        # same boot, the two freed NICs become genuinely indistinguishable
+        # candidates and neither auto-resolves (see
+        # verify_pending_node_never_gets_wrong_hardware() below for why
+        # guessing there is unsafe). Testing each mechanism in its own
+        # boot is what each can actually guarantee.
         log.info('Running interface naming/hw-id persistence tests')
         del_idx, hwid_idx = random.sample(range(8), 2)
-        log.info(f'Deleting eth{del_idx} entirely, removing hw-id only on eth{hwid_idx}')
 
+        log.info(f'Deleting eth{del_idx} entirely')
         c.sendline('configure')
         c.expect(cfg_mode_prompt)
         c.sendline(f'delete interfaces ethernet eth{del_idx}')
-        c.expect(cfg_mode_prompt)
-        c.sendline(f'delete interfaces ethernet eth{hwid_idx} hw-id')
         c.expect(cfg_mode_prompt)
         c.sendline('commit')
         c.expect(cfg_mode_prompt)
@@ -1335,7 +1434,7 @@ try:
         c.sendline('exit')
         c.expect(op_mode_prompt)
 
-        log.info('Rebooting to verify interface naming survives across reboot')
+        log.info('Rebooting to verify the fully deleted interface backfills its own gap')
         c.sendline('reboot now')
         waitForLogin(c, log)
         loginVM(c, log)
@@ -1355,6 +1454,118 @@ try:
         c.expect(op_mode_prompt)
 
         verify_eth_mac_mapping(c, log)
+
+        log.info(f"Removing hw-id only on eth{hwid_idx}, keeping its node")
+        c.sendline('configure')
+        c.expect(cfg_mode_prompt)
+        c.sendline(f'delete interfaces ethernet eth{hwid_idx} hw-id')
+        c.expect(cfg_mode_prompt)
+        c.sendline('commit')
+        c.expect(cfg_mode_prompt)
+        c.sendline('save')
+        c.expect(cfg_mode_prompt)
+        c.sendline('exit')
+        c.expect(op_mode_prompt)
+
+        log.info('Rebooting to verify the pending node reclaims its own hardware')
+        c.sendline('reboot now')
+        waitForLogin(c, log)
+        loginVM(c, log)
+
+        log.info('Collecting interface naming diagnostics')
+        c.sendline('show configuration commands | match "hw-id"')
+        c.expect(op_mode_prompt)
+        c.sendline('show interfaces ethernet')
+        c.expect(op_mode_prompt)
+        c.sendline('ip link show')
+        c.expect(op_mode_prompt)
+        c.sendline('show log | match "hw-id"')
+        c.expect(op_mode_prompt)
+        c.sendline('cat /run/dozenos-net-name-resolve.json 2>/dev/null || true')
+        c.expect(op_mode_prompt)
+        c.sendline('show log kernel | match "eth"')
+        c.expect(op_mode_prompt)
+
+        verify_eth_mac_mapping(c, log)
+
+        # Second, separate regression: a settings-bearing node must
+        # reclaim its OWN hardware, not whatever an ascending PCIe/MAC
+        # sort hands it, when an unrelated interface is fully removed in
+        # the same boot. The harness's own MACs are sequential
+        # (macbase:00..07), so a random del_idx/hwid_idx pair here would
+        # never expose this - a fresh install's initial bootstrap already
+        # sorts names and MACs together. Deterministically invert eth1's
+        # and eth2's hw-id first, so their names no longer follow
+        # ascending MAC order - exactly like any already-provisioned box,
+        # whose hw-id came from historical probe-order rescan rather than
+        # this sort.
+        log.info('Simulating an existing box whose interface names do not '
+                 'follow PCIe/MAC order, then replacing one NIC while a '
+                 'different, unrelated interface is fully removed')
+        mac1 = f'{macbase}:01'.lower()
+        mac2 = f'{macbase}:02'.lower()
+
+        c.sendline('configure')
+        c.expect(cfg_mode_prompt)
+        c.sendline('delete interfaces ethernet eth1 hw-id')
+        c.expect(cfg_mode_prompt)
+        c.sendline('delete interfaces ethernet eth2 hw-id')
+        c.expect(cfg_mode_prompt)
+        c.sendline(f"set interfaces ethernet eth1 hw-id '{mac2}'")
+        c.expect(cfg_mode_prompt)
+        c.sendline(f"set interfaces ethernet eth2 hw-id '{mac1}'")
+        c.expect(cfg_mode_prompt)
+        c.sendline("set interfaces ethernet eth2 address '10.99.2.1/24'")
+        c.expect(cfg_mode_prompt)
+        c.sendline('commit')
+        c.expect(cfg_mode_prompt)
+        c.sendline('save')
+        c.expect(cfg_mode_prompt)
+        c.sendline('exit')
+        c.expect(op_mode_prompt)
+
+        log.info('Rebooting to establish the swapped hw-id assignment as '
+                 "this box's existing state")
+        c.sendline('reboot now')
+        waitForLogin(c, log)
+        loginVM(c, log)
+
+        verify_swapped_hwid_assignment(c, log, mac1, mac2)
+
+        log.info('Fully removing eth1 while only clearing eth2\'s hw-id, '
+                 'keeping its address - the exact shape reported to '
+                 'silently bind a configured node to the wrong physical NIC')
+        c.sendline('configure')
+        c.expect(cfg_mode_prompt)
+        c.sendline('delete interfaces ethernet eth1')
+        c.expect(cfg_mode_prompt)
+        c.sendline('delete interfaces ethernet eth2 hw-id')
+        c.expect(cfg_mode_prompt)
+        c.sendline('commit')
+        c.expect(cfg_mode_prompt)
+        c.sendline('save')
+        c.expect(cfg_mode_prompt)
+        c.sendline('exit')
+        c.expect(op_mode_prompt)
+
+        log.info('Rebooting to check eth2 is never bound to the wrong physical NIC')
+        c.sendline('reboot now')
+        waitForLogin(c, log)
+        loginVM(c, log)
+
+        log.info('Collecting mac-order-mismatch diagnostics')
+        c.sendline('show configuration commands | match "hw-id"')
+        c.expect(op_mode_prompt)
+        c.sendline('show interfaces ethernet')
+        c.expect(op_mode_prompt)
+        c.sendline('ip link show')
+        c.expect(op_mode_prompt)
+        c.sendline('show log | match "hw-id"')
+        c.expect(op_mode_prompt)
+        c.sendline('cat /run/dozenos-net-name-resolve.json 2>/dev/null || true')
+        c.expect(op_mode_prompt)
+
+        verify_pending_node_never_gets_wrong_hardware(c, log, 'eth2', mac2)
 
     elif args.raid:
         # Verify RAID subsystem - by deleting a disk and re-create the array
