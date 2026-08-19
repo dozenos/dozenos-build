@@ -198,6 +198,10 @@ RUN wget https://salsa.debian.org/klausenbusk-guest/debootstrap/commit/a9a603b17
 # FPM is used when generation Debian pckages for e.g. Intel QAT drivers
 RUN gem install --no-document fpm
 
+# Add dozenos package repo
+COPY dozenos-dev.list /etc/apt/sources.list.d/dozenos-dev.list
+COPY dozenos-dev.key /usr/share/keyrings/dozenos-dev-archive-keyring.asc
+
 # Packages needed for dozenos-1x
 RUN pip --no-cache --no-cache-dir install --break-system-packages \
       git+https://github.com/aristanetworks/j2lint.git@341b5d5db86 \
