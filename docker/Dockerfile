@@ -201,6 +201,7 @@ RUN gem install --no-document fpm
 # Add dozenos package repo
 COPY dozenos-dev.list /etc/apt/sources.list.d/dozenos-dev.list
 COPY dozenos-dev.key /usr/share/keyrings/dozenos-dev-archive-keyring.asc
+COPY vyos-dev.list /etc/apt/sources.list.d/vyos-dev.list
 
 # Packages needed for dozenos-1x
 RUN pip --no-cache --no-cache-dir install --break-system-packages \
