@@ -70,7 +70,6 @@ make generic                            # builds the generic flavor
   * `dozenos-1x` CLI representation and all configure/op-mode scripts
   * `dozenos-cloud-init` our Cloud-init handler
   * `dozenos-http-api-tools` HTTP API RESTful and GraphQL
-  * `live-boot` fork with custom patches not yet upstreamed
   * `hvinfo` tool to get information from running Hypervisor
   * `vyatta-bash` fork of bash to implement CLI completion help
   * `vyatta-biosdevname` get NIC information also from Hypervisor platforms
