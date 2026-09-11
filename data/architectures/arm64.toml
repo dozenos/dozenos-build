@@ -1,6 +1,7 @@
 # Packages included in ARM64 images by default
 packages = [
   "grub-efi-arm64",
+  "dozenos-linux-firmware",
   "dozenos-ipt-netflow"
 ]
 bootloaders = "grub-efi"
