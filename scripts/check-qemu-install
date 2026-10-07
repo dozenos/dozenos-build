@@ -109,6 +109,16 @@ KEY_Y = chr(121)
 
 mok_password = '1234'
 
+# Custom Secure Boot signing material (see docs.dozenos.io installation/secure-boot).
+# If present, the image was signed with a custom CA and the MOK must be enrolled.
+# If absent, the image is expected to be signed by the DozenOS CA and boots as-is.
+SB_CERT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'certificates')
+SB_CUSTOM_KEY = os.path.join(SB_CERT_DIR, 'dozenos-dev-2025-linux.key')
+SB_CUSTOM_CERT = os.path.join(SB_CERT_DIR, 'dozenos-dev-2025-linux.pem')
+# Expected Linux Kernel signature certificate of a DozenOS CA signed image
+SB_DOZENOS_ISSUER = '/CN=DozenOS Networks Secure Boot CA'
+SB_DOZENOS_SUBJECT = '/CN=DozenOS Networks Secure Boot Signer 2025 - linux'
+
 # Map QEMU arch
 QEMU_CONFIG = {
     'amd64': {
@@ -147,7 +157,8 @@ parser.add_argument('--tpmtest', help='Execute TPM encrypted config tests',
                 action='store_true', default=False)
 parser.add_argument('--ifnametest', help='Execute interface naming/hw-id persistence tests',
                 action='store_true', default=False)
-parser.add_argument('--sbtest', help='Execute Secure Boot tests',
+parser.add_argument('--secure-boot-test', help='Execute Secure Boot tests (enrolls MOK only if custom '
+                                     'signing certificates exist in data/certificates)',
                 action='store_true', default=False)
 parser.add_argument('--cloud-init', help='Execute cloud-init tests',
                 action='store_true', default=False)
@@ -418,20 +429,20 @@ if args.smoketest:
     _primary_modes.append('--smoketest')
 if args.configtest:
     _primary_modes.append('--configtest')
-if args.sbtest:
-    _primary_modes.append('--sbtest')
+if args.secure_boot_test:
+    _primary_modes.append('--secure-boot-test')
 if len(_primary_modes) > 1:
     log.error('Incompatible combination of testcase flags (%s): only one of '
         '--cloud-init, --test-image-update, --tpmtest, --ifnametest, --raid, '
-        '--smoketest, --configtest, --sbtest may be set.', ', '.join(_primary_modes))
+        '--smoketest, --configtest, --secure-boot-test may be set.', ', '.join(_primary_modes))
     sys.exit(1)
 
 if args.no_interfaces and not args.smoketest:
     log.error('--no-interfaces requires --smoketest')
     sys.exit(1)
 
-if args.sbtest and not args.uefi:
-    log.error('--sbtest requires --uefi')
+if args.secure_boot_test and not args.uefi:
+    log.error('--secure-boot-test requires --uefi')
     sys.exit(1)
 
 if args.logfile:
@@ -467,8 +478,15 @@ if args.test_image_update and not args.iso:
 
 OVMF_CODE = '/usr/share/OVMF/OVMF_CODE_4M.secboot.fd'
 OVMF_VARS_TMP = args.disk.replace(DISK_IMAGE_EXTENSION, '.efivars')
-if args.sbtest:
+if args.secure_boot_test:
     shutil.copy('/usr/share/OVMF/OVMF_VARS_4M.ms.fd', OVMF_VARS_TMP)
+
+sb_custom_ca = args.secure_boot_test and os.path.isfile(SB_CUSTOM_KEY) and os.path.isfile(SB_CUSTOM_CERT)
+if args.secure_boot_test:
+    if sb_custom_ca:
+        log.info('Secure Boot test: custom signing certificate found - enrolling MOK')
+    else:
+        log.info('Secure Boot test: no custom signing certificate - expecting DozenOS CA signed image')
 
 # Creating diskimage!!
 diskname_raid = None
@@ -568,9 +586,10 @@ def toggleUEFISecureBoot(c):
     UEFIKeyPress(c, KEY_DOWN)
     UEFIKeyPress(c, KEY_RETURN)
 
-def BOOTLOADERchooseSerialConsole(child, live: bool, log=None) -> None:
-    """ Select GRUB boot entry that uses the serial console. This differs
-        between a LIVE ISO image and an already installed system. """
+def BOOTLOADERchooseSerialConsole(child, live: bool) -> None:
+    """ Select the boot entry that uses the serial console on a LIVE ISO image.
+        An already installed system boots its default entry, which already
+        uses the serial console. """
     BOOTLOADER_TMO = 40
     BOOTLOADER_SLEEP = 1.5
     BOOTLOADER_LOAD_TMO = 5 # let GRUB screen load
@@ -617,58 +636,13 @@ def BOOTLOADERchooseSerialConsole(child, live: bool, log=None) -> None:
         # Wait for GRUB
         child.expect(GRUB_STRING, timeout=BOOTLOADER_TMO)
 
-        # The installed system's top-level menu auto-boots its default
-        # entry after ~BOOTLOADER_LOAD_TMO seconds, timed from when GRUB
-        # itself draws the menu - not from when this script's regex match
-        # on GRUB_STRING returns. Under host load the menu text can reach
-        # us well after that internal countdown already started, so there
-        # is no reliable amount of "send a key fast enough" that wins this
-        # race every time.
-        #
-        # That's fine to lose: the installer always answers 'S' (serial)
-        # to "What console should be used by default?", so the default
-        # entry GRUB auto-boots already targets the right console.
-        # waitForLogin()/loginVM(), called after this function returns,
-        # already tolerate landing straight on the GRUB countdown or the
-        # login prompt. So treat this submenu navigation as best-effort:
-        # if we don't land in "Boot options" in time, stop navigating and
-        # let the default entry (which is already auto-booting) carry on,
-        # instead of raising and aborting the whole test.
-        try:
-            # Select GRUB serial console
-            # Boot options
-            child.send(KEY_DOWN)
-            time.sleep(BOOTLOADER_LOAD_TMO)
-            child.send(KEY_RETURN)
-            time.sleep(BOOTLOADER_SLEEP)
-            # GRUB submenus never time out on their own, so confirm we actually
-            # landed on this submenu before navigating further - otherwise a
-            # dropped keypress leaves the VM stuck here until the login wait
-            # elsewhere expires
-            child.expect('Select console type', timeout=BOOTLOADER_TMO)
-        except pexpect.TIMEOUT:
-            if log is not None:
-                log.warning('GRUB auto-booted the default entry before "Boot '
-                            'options" navigation completed; continuing since '
-                            'the default entry already boots the serial '
-                            'console selected during install')
-        else:
-            # We're inside the submenu, so a timeout past this point is a
-            # real navigation bug, not the auto-boot race - let it propagate.
-            # Select console type
-            child.send(KEY_DOWN)
-            time.sleep(BOOTLOADER_SLEEP)
-            child.send(KEY_RETURN)
-            time.sleep(BOOTLOADER_SLEEP)
-            child.expect(r'ttyS \(serial\)', timeout=BOOTLOADER_TMO)
-
-            # *ttyS (serial)
-            child.send(KEY_DOWN)
-            time.sleep(BOOTLOADER_SLEEP)
-            child.send(KEY_RETURN)
-            time.sleep(BOOTLOADER_SLEEP)
-            # Boot
-            child.send(KEY_RETURN)
+        # Do not navigate the installed system's GRUB menu. The installer
+        # already made the serial console the default (we answer 'S' to
+        # "What console should be used by default?", raw images get it from
+        # the build flavor), so the default entry boots the right console.
+        # Steering the menu with timed keypresses raced GRUB's auto-boot
+        # countdown and lost keypresses under host load (T8147, T9099,
+        # T9214). basic_cli_tests() verifies the console settings.
 
     return None
 
@@ -951,7 +925,7 @@ def _image_update_cli_sequence(c, log, new_image_name, server_bind_host='127.0.0
 
 if args.qemu_cmd:
     tmp = get_qemu_cmd(qemu_name, args.uefi, args.disk, raid=diskname_raid,
-                       iso_img=args.iso, vnc_enabled=args.vnc, secure_boot=args.sbtest,
+                       iso_img=args.iso, vnc_enabled=args.vnc, secure_boot=args.secure_boot_test,
                        nested_cdrom_iso=nested_payload_iso_path)
     os.system(tmp)
     exit(0)
@@ -1011,19 +985,25 @@ try:
     log.info('Installing system')
     cmd = get_qemu_cmd(qemu_name, args.uefi, args.disk, raid=diskname_raid,
                        tpm=args.tpmtest, iso_img=args.iso, vnc_enabled=args.vnc,
-                       secure_boot=args.sbtest, nested_cdrom_iso=nested_payload_iso_path)
+                       secure_boot=args.secure_boot_test, nested_cdrom_iso=nested_payload_iso_path)
     log.debug(f'Executing command: {cmd}')
     c = pexpect.spawn(cmd, logfile=stl, timeout=60)
 
     #################################################
     # Logging into DozenOS system
     #################################################
-    if args.sbtest:
+    if sb_custom_ca:
         log.info('Disable UEFI Secure Boot for initial installation')
         toggleUEFISecureBoot(c)
 
-    BOOTLOADERchooseSerialConsole(c, live=(not args.cloud_init), log=log)
+    BOOTLOADERchooseSerialConsole(c, live=(not args.cloud_init))
     loginVM(c, log)
+
+    if args.secure_boot_test and not sb_custom_ca:
+        log.info('Verify live system booted with UEFI Secure Boot enabled')
+        c.sendline('show secure-boot')
+        c.expect('SecureBoot enabled')
+        c.expect(op_mode_prompt)
 
     #################################################
     # Cloud-Init comes with a pre-assembled ISO - just boot and test it
@@ -1121,9 +1101,11 @@ try:
         c.expect('\nWhich file would you like as boot config?.*')
         c.sendline('')
 
-    c.expect(op_mode_prompt)
+    # GRUB installation and unmounting (flushing the copied squashfs to disk)
+    # can take longer than the default pexpect timeout on large images
+    c.expect(op_mode_prompt, timeout=300)
 
-    if args.sbtest:
+    if sb_custom_ca:
         c.sendline('install mok')
         c.expect('input password:.*')
         c.sendline(mok_password)
@@ -1137,7 +1119,7 @@ try:
     #################################################
     # SHIM Mok Manager
     #################################################
-    if args.sbtest:
+    if sb_custom_ca:
         log.info('Install Secure Boot Machine Owner Key')
         MOK_SLEEP = 0.5
         c.expect('BdsDxe: starting Boot00.*')
@@ -1175,7 +1157,7 @@ try:
     #################################################
     # Re-Enable Secure Boot
     #################################################
-    if args.sbtest:
+    if sb_custom_ca:
         log.info('Enable UEFI Secure Boot for initial installation')
         toggleUEFISecureBoot(c)
 
@@ -1190,7 +1172,7 @@ try:
     # Booting installed system
     #################################################
     log.info('Booting installed system')
-    BOOTLOADERchooseSerialConsole(c, live=False, log=log)
+    BOOTLOADERchooseSerialConsole(c, live=False)
 
     #################################################
     # Logging into DozenOS system
@@ -1805,9 +1787,18 @@ try:
         c.sendline(f'sudo umount {NESTED_HTTP_MOUNT_POINT}')
         c.expect(op_mode_prompt)
         log.info('Nested installer ISO testcase complete')
-    elif args.sbtest:
+    elif args.secure_boot_test:
         c.sendline('show secure-boot')
         c.expect('SecureBoot enabled')
+        c.expect(op_mode_prompt)
+
+        c.sendline('show secure-boot detail')
+        if sb_custom_ca:
+            c.expect('Issuer: ')
+        else:
+            log.info('Verify Linux Kernel is signed by the DozenOS Secure Boot CA')
+            c.expect(re.escape(f'Issuer:  {SB_DOZENOS_ISSUER}'))
+            c.expect(re.escape(f'Subject: {SB_DOZENOS_SUBJECT}'))
         c.expect(op_mode_prompt)
     else:
         log.info('No testcase selected!')
@@ -1859,7 +1850,7 @@ if not args.keep:
         os.remove(args.disk)
         if diskname_raid:
             os.remove(diskname_raid)
-        if args.sbtest:
+        if args.secure_boot_test:
             os.remove(OVMF_VARS_TMP)
     except Exception:
         log.error('Exception while removing diskimage!')
