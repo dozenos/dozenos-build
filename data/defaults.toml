@@ -14,7 +14,8 @@ dozenos_mirror = "https://packages.dozenos.net/repositories/rolling"
 dozenos_branch = "rolling"
 release_train = "rolling"
 
-kernel_version = "6.18.60"
+kernel_version = "6.18.62"
+kernel_revision = "1"
 kernel_flavor = "dozenos"
 bootloaders = "syslinux,grub-efi"
 

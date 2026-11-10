@@ -10,6 +10,11 @@ DozenOS runs on a custom Linux Kernel. The version built is pinned by
 repository holds the build scripts used to build the custom Kernel for
 x86_64/amd64 and arm64, plus all required out-of-tree modules.
 
+The resulting Kernel release is `<kernel_version>-<kernel_revision>-<kernel_flavor>`,
+e.g. `6.18.60-1-dozenos`. `kernel_revision` is a DozenOS internal number: bump it when
+rebuilding the same upstream version with additional patches (e.g. security
+fixes) and reset it to 1 when `kernel_version` changes.
+
 DozenOS does not utilize the build in Intel Kernel drivers for its NICs as those
 Kernels sometimes lack features e.g. configurable receive-side-scaling queues.
 On the other hand we ship additional not mainlined features as WireGuard VPN.
